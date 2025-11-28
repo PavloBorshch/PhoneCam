@@ -1,18 +1,29 @@
 package com.example.phonecam
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -38,6 +49,8 @@ import com.example.phonecam.data.WebcamRepository
 import com.example.phonecam.data.AppDatabase
 import com.example.phonecam.data.LogEntity
 import com.example.phonecam.network.RetrofitInstance
+import com.example.phonecam.ui.DashboardSection
+import com.example.phonecam.ui.MapScreen
 import com.example.phonecam.ui.theme.PhoneCamTheme
 import com.example.phonecam.worker.SyncWorker
 import kotlinx.coroutines.flow.collectLatest
@@ -56,8 +69,13 @@ class MainActivity : ComponentActivity() {
         setupBackgroundSync()
 
         setContent {
-            PhoneCamTheme(darkTheme = false) { // ЗАНЯТТЯ 4: Темізація
+            PhoneCamTheme(darkTheme = false) {
+                // Request Permission Logic
+                RequestNotificationPermission()
+
                 val context = LocalContext.current
+                // Приводимо context до Application для ViewModelFactory
+                val application = context.applicationContext as android.app.Application
 
                 // Room Database
                 val database = AppDatabase.getDatabase(context)
@@ -70,10 +88,25 @@ class MainActivity : ComponentActivity() {
 
                 //  ViewModel
                 val viewModel: WebcamViewModel = viewModel(
-                    factory = WebcamViewModelFactory(repository)
+                    factory = WebcamViewModelFactory(application, repository)
                 )
 
                 AppNavigation(viewModel)
+            }
+        }
+    }
+
+    @Composable
+    fun RequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val launcher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission(),
+                onResult = { isGranted ->
+                    // Можна додати логіку, якщо користувач відмовив
+                }
+            )
+            LaunchedEffect(Unit) {
+                launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
     }
@@ -107,7 +140,8 @@ fun AppNavigation(viewModel: WebcamViewModel) {
         viewModel.eventFlow.collectLatest { message ->
             snackbarHostState.showSnackbar(
                 message = message,
-                duration = SnackbarDuration.Short
+                duration = SnackbarDuration.Short,
+                withDismissAction = true
             )
         }
     }
@@ -130,6 +164,12 @@ fun AppNavigation(viewModel: WebcamViewModel) {
                     label = { Text("Головна") },
                     selected = true,
                     onClick = { navController.navigate("home") }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.LocationOn, contentDescription = null) },
+                    label = { Text("Карта") },
+                    selected = false,
+                    onClick = { navController.navigate("map") }
                 )
                 NavigationBarItem(
                     icon = { Icon(Icons.Default.List, contentDescription = null) },
@@ -162,7 +202,9 @@ fun AppNavigation(viewModel: WebcamViewModel) {
                     }
                 )
             }
-            // Екран історії
+            composable("map") {
+                MapScreen(controllers = uiState.mapLocations)
+            }
             composable("history") {
                 LogHistoryScreen(viewModel)
             }
@@ -266,6 +308,16 @@ fun MainContent(
     onCheckController: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // ЗАВДАННЯ 16: Анімація кольору при тривозі
+    val cardColor by animateColorAsState(
+        targetValue = if (state.isCriticalAlert) Color.Red else if (state.isStreaming) Color(0xFF2E7D32) else Color(0xFFC62828),
+        animationSpec = infiniteRepeatable(
+            animation = tween(500),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "AlertAnimation"
+    )
+
     val parametersList = listOf(
         ParameterItem("Камера", state.cameraSettings.cameraName),
         ParameterItem("Роздільна здатність", "${state.cameraSettings.width}x${state.cameraSettings.height}"),
@@ -273,24 +325,29 @@ fun MainContent(
         ParameterItem("Протокол", state.currentProtocol),
         ParameterItem("FPS", "${state.currentFps}"),
         ParameterItem("Бітрейт", state.formattedBitrate),
-        ParameterItem("Тривалість", state.connectionDuration)
+        ParameterItem("Тривалість", state.connectionDuration),
+        ParameterItem("CPU Temp", "%.1f°C".format(state.cpuTemp)),
+        ParameterItem("Voltage", "%.1f V".format(state.inputVoltage))
     )
     val protocols = listOf("RTSP", "HTTP", "MJPEG", "USB")
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
-        // Картка Статусу
+
+        // 1. Картка статусу
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = if (state.isStreaming) Color(0xFF2E7D32) else Color(0xFFC62828)
-            )
+            colors = CardDefaults.cardColors(containerColor = cardColor)
         ) {
             Column(
                 modifier = Modifier.padding(16.dp).fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = if (state.isStreaming) "ТРАНСЛЯЦІЯ АКТИВНА" else "ТРАНСЛЯЦІЯ ЗУПИНЕНА",
+                    text = when {
+                        state.isCriticalAlert -> "КРИТИЧНА ПОМИЛКА!"
+                        state.isStreaming -> "ТРАНСЛЯЦІЯ АКТИВНА"
+                        else -> "ТРАНСЛЯЦІЯ ЗУПИНЕНА"
+                    },
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
@@ -298,45 +355,15 @@ fun MainContent(
                 // Відображення Public IP з API
                 Text("Public IP: ${state.publicIp}", color = Color.White.copy(alpha = 0.9f))
                 if (state.isStreaming) {
-                    Text("Local IP: ${state.cameraSettings.serverIp}", color = Color.White)
-                    Text("Час: ${state.connectionDuration}", color = Color.White, fontWeight = FontWeight.Light)
+                    Text("Live Stream (WebSocket)", color = Color.White.copy(alpha = 0.9f))
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // UI для JSON/XML парсингу
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Діагностика (JSON/XML)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = onCheckController, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Оновити")
-                    }
-                }
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.2f))
-
-                // Відображення розпарсеного тексту
-                Text(
-                    text = state.controllerStatus,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
+        // 2. Вибір протоколу
         Text("Оберіть протокол:", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
-        // Горизонтальний список
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(protocols) { protocol ->
                 SuggestionChip(
@@ -353,7 +380,74 @@ fun MainContent(
         Spacer(modifier = Modifier.height(16.dp))
 
         Text("Моніторинг потоку", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
-        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+        // Scrollable Area
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 8.dp)
+        ) {
+            // Діагностика
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Діагностика (JSON/XML)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                            IconButton(onClick = onCheckController, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Оновити")
+                            }
+                        }
+                        Text(
+                            text = state.controllerStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+            }
+
+            // KPI Dashboard
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                // Передаємо alert state для підсвічування рамок
+                DashboardSection(state)
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Графік стабільності
+            if (state.isStreaming) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(
+                                // Червона рамка якщо бітрейт падає низько (логіка може бути розширена)
+                                if (state.currentBitrate < 2000 && state.currentBitrate > 0)
+                                    Modifier.border(2.dp, Color.Red, RoundedCornerShape(12.dp))
+                                else Modifier
+                            )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("Стабільність мережі (Live)", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
+                            com.example.phonecam.BitrateChart(
+                                dataPoints = state.bitrateHistory,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+
+            // Список параметрів
             items(parametersList) { item ->
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -364,10 +458,19 @@ fun MainContent(
             }
         }
 
-        Button(onClick = onToggleStream, modifier = Modifier.fillMaxWidth().height(56.dp)) {
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Кнопка запуску
+        Button(
+            onClick = onToggleStream,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (state.isStreaming) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+        ) {
             Icon(Icons.Default.PlayArrow, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
-            Text(if (state.isStreaming) "Зупинити" else "Запустити трансляцію")
+            Text(if (state.isStreaming) "Зупинити трансляцію" else "Запустити трансляцію")
         }
     }
 }

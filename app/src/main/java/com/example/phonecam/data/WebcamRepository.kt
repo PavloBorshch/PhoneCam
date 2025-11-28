@@ -5,6 +5,8 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import com.example.phonecam.network.ControllerConfig
 import com.example.phonecam.network.IpApiService
+import com.example.phonecam.network.RealtimeData
+import com.example.phonecam.network.WebSocketManager
 import com.example.phonecam.utils.XmlParser
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
@@ -18,8 +20,14 @@ class WebcamRepository(
 
     val settingsFlow: Flow<SettingsEntity?> = settingsDao.getSettings()
 
-    // Ініціалізація JSON парсера (Kotlin Serialization)
+    // Ініціалізація WebSocket менеджера
+    private val webSocketManager = WebSocketManager()
     private val jsonParser = Json { ignoreUnknownKeys = true }
+
+    // Функція для підписки на реалтайм потік
+    fun observeRealtimeData(): Flow<RealtimeData> {
+        return webSocketManager.connectToDataStream()
+    }
 
     fun getPagedLogs(): Flow<PagingData<LogEntity>> {
         return Pager(

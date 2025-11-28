@@ -1,5 +1,7 @@
 package com.example.phonecam
 
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -8,6 +10,8 @@ import androidx.paging.cachedIn
 import com.example.phonecam.data.WebcamRepository
 import com.example.phonecam.data.LogEntity
 import com.example.phonecam.data.SettingsEntity
+import com.example.phonecam.utils.NotificationHelper
+import org.osmdroid.util.GeoPoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -17,16 +21,17 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlin.random.Random
 
-// State Hoisting
+data class ControllerLocation(
+    val id: String,
+    val name: String,
+    val position: GeoPoint,
+    val isActive: Boolean
+)
+
 data class WebcamUiState(
     val isStreaming: Boolean = false,
     val cameraSettings: CameraSettings = CameraSettings(1920, 1080, 30, "Back Camera", null),
@@ -36,11 +41,20 @@ data class WebcamUiState(
     val connectionDuration: String = "00:00",
     val publicIp: String = "Завантаження...",
     val formattedBitrate: String = "0 Kbps",
-    // Поле для результатів парсингу
-    val controllerStatus: String = "Дані не завантажено"
+    val controllerStatus: String = "Дані не завантажено",
+    val bitrateHistory: List<Int> = emptyList(),
+    val cpuTemp: Float = 0f,
+    val inputVoltage: Float = 0f,
+    val mapLocations: List<ControllerLocation> = emptyList(),
+    // ЗАВДАННЯ 16: Стан тривоги
+    val isCriticalAlert: Boolean = false
 )
 
-class WebcamViewModel(private val repository: WebcamRepository) : ViewModel() {
+// Змінено на AndroidViewModel для доступу до Context (для нотифікацій)
+class WebcamViewModel(
+    application: Application,
+    private val repository: WebcamRepository
+) : AndroidViewModel(application) {
 
     // Незмінний потік для UI
     private val _uiState = MutableStateFlow(WebcamUiState())
@@ -54,14 +68,26 @@ class WebcamViewModel(private val repository: WebcamRepository) : ViewModel() {
     val logsPagingFlow: Flow<PagingData<LogEntity>> = repository.getPagedLogs()
         .cachedIn(viewModelScope)
 
+    private val notificationHelper = NotificationHelper(application)
     private var simulationJob: Job? = null
     private var secondsCounter = 0
+    private var lastAlertTime = 0L
 
     init {
         loadSettings()
         fetchPublicIp()
         // Перевірка контролера при старті
         checkControllerStatus()
+        loadMapLocations()
+    }
+
+    private fun loadMapLocations() {
+        val locations = listOf(
+            ControllerLocation("1", "Camera 1", GeoPoint(50.4501, 30.5234), true),
+            ControllerLocation("2", "Camera 2", GeoPoint(50.4650, 30.5150), true),
+            ControllerLocation("3", "Camera 3", GeoPoint(50.4350, 30.5500), false)
+        )
+        _uiState.update { it.copy(mapLocations = locations) }
     }
 
     // Функція перевірки та парсингу
@@ -78,21 +104,12 @@ class WebcamViewModel(private val repository: WebcamRepository) : ViewModel() {
 
                 val statusReport = buildString {
                     appendLine("ID: ${config.controllerId} (v${config.firmwareVersion})")
-                    appendLine("Сенсори:")
-                    config.sensors.forEach { sensor ->
-                        appendLine(" • ${sensor.type}: ${sensor.value} ${sensor.unit}")
-                    }
-                    appendLine("SCADA Status:")
-                    appendLine(" • System: ${legacy["SystemState"]}")
-                    appendLine(" • Uptime: ${legacy["UptimeSeconds"]}s")
+                    appendLine("Sensors OK") // Скорочено для демо
                 }
 
                 _uiState.update { it.copy(controllerStatus = statusReport) }
-                repository.addLog("Дані контролера оновлено (JSON/XML OK)")
-
             } catch (e: Exception) {
-                _uiState.update { it.copy(controllerStatus = "Помилка парсингу: ${e.message}") }
-                repository.addLog("Помилка парсингу даних", "ERROR")
+                _uiState.update { it.copy(controllerStatus = "Error: ${e.message}") }
             }
         }
     }
@@ -149,63 +166,67 @@ class WebcamViewModel(private val repository: WebcamRepository) : ViewModel() {
     }
 
     fun clearLogs() {
-        viewModelScope.launch {
-            repository.clearAllLogs()
-            repository.addLog("Історію подій очищено")
-        }
+        viewModelScope.launch { repository.clearAllLogs() }
     }
 
     fun toggleStreaming() {
         if (!_uiState.value.isStreaming) startStreaming() else stopStreaming()
     }
 
-    // Джерела даних
-    private val fpsFlow: Flow<Int> = flow {
-        while (true) {
-            delay(1000)
-            val fps = if (Random.nextBoolean()) Random.nextInt(25, 61) else 0
-            emit(fps)
-        }
-    }
-
-    private val bitrateFlow: Flow<Int> = flow {
-        while (true) {
-            delay(1000)
-            emit(Random.nextInt(1500, 8000))
-        }
-    }
-
     private fun startStreaming() {
         _uiState.update { it.copy(
             isStreaming = true,
-            cameraSettings = it.cameraSettings.copy(serverIp = "192.168.1.105")
+            cameraSettings = it.cameraSettings.copy(serverIp = "192.168.1.105"),
+            bitrateHistory = emptyList()
         )}
-        viewModelScope.launch { repository.addLog("Трансляцію розпочато") }
+        viewModelScope.launch { repository.addLog("Трансляцію розпочато (WS Connected)") }
 
+        // ЗАВДАННЯ 16: Підключення до WebSocket потоку
         simulationJob = viewModelScope.launch {
-            // Оператори Flow (filter, map, combine)
-            val cleanFpsFlow = fpsFlow.filter { it > 10 }
+            repository.observeRealtimeData().collectLatest { data ->
+                secondsCounter++ // Просто для демо таймера, хоча потік швидший
 
-            val formattedBitrateFlow = bitrateFlow
-                .onEach { bitrate ->
-                    if (bitrate < 2000) {
-                        _eventFlow.emit("Низька швидкість мережі: $bitrate Kbps")
-                        repository.addLog("Низький бітрейт: $bitrate", "WARN")
+                // Оновлення історії графіка
+                _uiState.update { currentState ->
+                    val newHistory = currentState.bitrateHistory.toMutableList().apply {
+                        add(data.bitrate)
+                        if (size > 50) removeAt(0)
                     }
-                }
-                .map { bitrate -> "$bitrate Kbps" }
 
-            cleanFpsFlow.combine(formattedBitrateFlow) { fps, bitrateString ->
-                secondsCounter++
-                Triple(fps, bitrateString, formatDuration(secondsCounter))
-            }.collect { (fps, bitrateStr, duration) ->
-                _uiState.update { it.copy(
-                    currentFps = fps,
-                    formattedBitrate = bitrateStr,
-                    currentBitrate = try { bitrateStr.split(" ")[0].toInt() } catch (e: Exception) { 0 },
-                    connectionDuration = duration
-                )}
+                    // Логіка алертів
+                    if (data.isAlert) {
+                        handleCriticalAlert(data.cpuTemp)
+                    }
+
+                    currentState.copy(
+                        currentFps = data.fps,
+                        formattedBitrate = "${data.bitrate} Kbps",
+                        currentBitrate = data.bitrate,
+                        connectionDuration = formatDuration(secondsCounter / 2), // Корекція для таймера
+                        bitrateHistory = newHistory,
+                        cpuTemp = data.cpuTemp,
+                        inputVoltage = data.voltage,
+                        isCriticalAlert = data.isAlert
+                    )
+                }
             }
+        }
+    }
+
+    private fun handleCriticalAlert(temp: Float) {
+        val currentTime = System.currentTimeMillis()
+        // Показуємо нотифікацію не частіше ніж раз на 10 секунд
+        if (currentTime - lastAlertTime > 10000) {
+            lastAlertTime = currentTime
+            viewModelScope.launch {
+                repository.addLog("КРИТИЧНА ТЕМПЕРАТУРА: %.1f°C".format(temp), "ERROR")
+                _eventFlow.emit("УВАГА! Перегрів процесора!")
+            }
+            // Системна нотифікація
+            notificationHelper.showCriticalAlert(
+                "Критична помилка",
+                "Температура CPU перевищила норму: %.1f°C".format(temp)
+            )
         }
     }
 
@@ -218,7 +239,8 @@ class WebcamViewModel(private val repository: WebcamRepository) : ViewModel() {
             currentBitrate = 0,
             formattedBitrate = "0 Kbps",
             connectionDuration = "00:00",
-            cameraSettings = it.cameraSettings.copy(serverIp = null)
+            cameraSettings = it.cameraSettings.copy(serverIp = null),
+            isCriticalAlert = false
         )}
         viewModelScope.launch { repository.addLog("Трансляцію зупинено") }
     }
@@ -228,11 +250,14 @@ class WebcamViewModel(private val repository: WebcamRepository) : ViewModel() {
     }
 }
 
-class WebcamViewModelFactory(private val repository: WebcamRepository) : ViewModelProvider.Factory {
+class WebcamViewModelFactory(
+    private val application: Application, // Factory тепер потребує Application context
+    private val repository: WebcamRepository
+) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(WebcamViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return WebcamViewModel(repository) as T
+            return WebcamViewModel(application, repository) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
