@@ -1,16 +1,23 @@
 package com.example.phonecam
 
 import android.Manifest
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.nfc.NfcAdapter
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateColor
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -22,11 +29,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -35,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -49,8 +57,10 @@ import com.example.phonecam.data.WebcamRepository
 import com.example.phonecam.data.AppDatabase
 import com.example.phonecam.data.LogEntity
 import com.example.phonecam.network.RetrofitInstance
+import com.example.phonecam.ui.BluetoothScreen
 import com.example.phonecam.ui.DashboardSection
 import com.example.phonecam.ui.MapScreen
+import com.example.phonecam.ui.ScanScreen
 import com.example.phonecam.ui.theme.PhoneCamTheme
 import com.example.phonecam.worker.SyncWorker
 import kotlinx.coroutines.flow.collectLatest
@@ -59,14 +69,19 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-// Основна программа
 class MainActivity : ComponentActivity() {
+
+    private var nfcAdapter: NfcAdapter? = null
+    private lateinit var viewModel: WebcamViewModel
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         // WorkManager (Фонова синхронізація)
         setupBackgroundSync()
+
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
 
         setContent {
             PhoneCamTheme(darkTheme = false) {
@@ -86,8 +101,7 @@ class MainActivity : ComponentActivity() {
                 // Repository Pattern
                 val repository = remember { WebcamRepository(dao, logDao, api) }
 
-                //  ViewModel
-                val viewModel: WebcamViewModel = viewModel(
+                viewModel = viewModel(
                     factory = WebcamViewModelFactory(application, repository)
                 )
 
@@ -96,14 +110,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (NfcAdapter.ACTION_NDEF_DISCOVERED == intent.action ||
+            NfcAdapter.ACTION_TAG_DISCOVERED == intent.action) {
+
+            val tagId = intent.getByteArrayExtra(NfcAdapter.EXTRA_ID)?.joinToString("") { "%02X".format(it) }
+            val message = "NFC Tag Detected: $tagId"
+
+            if (::viewModel.isInitialized) {
+                viewModel.onDeviceIdentified("NFC-$tagId-CAM-01")
+            }
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_MUTABLE)
+        val filters = arrayOf(IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED))
+        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, filters, null)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        nfcAdapter?.disableForegroundDispatch(this)
+    }
+
     @Composable
     fun RequestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val launcher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestPermission(),
-                onResult = { isGranted ->
-                    // Можна додати логіку, якщо користувач відмовив
-                }
+                onResult = {}
             )
             LaunchedEffect(Unit) {
                 launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -123,19 +163,59 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Composable
+fun RequestBluetoothPermissions(onPermissionGranted: () -> Unit) {
+    val context = LocalContext.current
+    val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val allGranted = perms.values.all { it }
+        if (allGranted) {
+            onPermissionGranted()
+        } else {
+            Toast.makeText(context, "Bluetooth permissions required", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val allGranted = permissions.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
+        if (allGranted) {
+            onPermissionGranted()
+        }
+    }
+}
+
+
 data class ParameterItem(val label: String, val value: String)
 
-// Navigation Component
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppNavigation(viewModel: WebcamViewModel) {
     val navController = rememberNavController()
     // StateFlow (Підписка на стан UI)
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
 
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // SharedFlow (Обробка одноразових подій)
+    val blePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        if (perms.values.all { it }) {
+            viewModel.startBleScan()
+        } else {
+            Toast.makeText(context, "Необхідні дозволи Bluetooth", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     LaunchedEffect(key1 = true) {
         viewModel.eventFlow.collectLatest { message ->
             snackbarHostState.showSnackbar(
@@ -166,22 +246,22 @@ fun AppNavigation(viewModel: WebcamViewModel) {
                     onClick = { navController.navigate("home") }
                 )
                 NavigationBarItem(
+                    icon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    label = { Text("Скан") },
+                    selected = false,
+                    onClick = { navController.navigate("scan") }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.Share, contentDescription = null) },
+                    label = { Text("BLE") },
+                    selected = false,
+                    onClick = { navController.navigate("bluetooth") }
+                )
+                NavigationBarItem(
                     icon = { Icon(Icons.Default.LocationOn, contentDescription = null) },
                     label = { Text("Карта") },
                     selected = false,
                     onClick = { navController.navigate("map") }
-                )
-                NavigationBarItem(
-                    icon = { Icon(Icons.Default.List, contentDescription = null) },
-                    label = { Text("Історія") },
-                    selected = false,
-                    onClick = { navController.navigate("history") }
-                )
-                NavigationBarItem(
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text("Налаштування") },
-                    selected = false,
-                    onClick = { }
                 )
             }
         }
@@ -204,6 +284,30 @@ fun AppNavigation(viewModel: WebcamViewModel) {
             }
             composable("map") {
                 MapScreen(controllers = uiState.mapLocations)
+            }
+            composable("bluetooth") {
+                BluetoothScreen(
+                    scannedDevices = uiState.scannedDevices,
+                    connectionState = uiState.bleConnectionState,
+                    onScanStart = {
+                        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                        } else {
+                            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                        }
+                        blePermissionLauncher.launch(permissions)
+                    },
+                    onConnect = { device -> viewModel.connectToBleDevice(device) },
+                    onDisconnect = { viewModel.disconnectBle() }
+                )
+            }
+            composable("scan") {
+                ScanScreen(
+                    onCodeScanned = { code ->
+                        viewModel.onDeviceIdentified(code)
+                        navController.popBackStack()
+                    }
+                )
             }
             composable("history") {
                 LogHistoryScreen(viewModel)
@@ -308,15 +412,22 @@ fun MainContent(
     onCheckController: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // ЗАВДАННЯ 16: Анімація кольору при тривозі
-    val cardColor by animateColorAsState(
-        targetValue = if (state.isCriticalAlert) Color.Red else if (state.isStreaming) Color(0xFF2E7D32) else Color(0xFFC62828),
+    val infiniteTransition = rememberInfiniteTransition(label = "AlertPulse")
+    val alertPulseColor by infiniteTransition.animateColor(
+        initialValue = Color.Red,
+        targetValue = Color(0xFF8B0000), // Dark Red
         animationSpec = infiniteRepeatable(
             animation = tween(500),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "AlertAnimation"
+        label = "AlertColor"
     )
+
+    val cardColor = when {
+        state.isCriticalAlert -> alertPulseColor
+        state.isStreaming -> Color(0xFF2E7D32)
+        else -> Color(0xFFC62828)
+    }
 
     val parametersList = listOf(
         ParameterItem("Камера", state.cameraSettings.cameraName),
@@ -326,14 +437,18 @@ fun MainContent(
         ParameterItem("FPS", "${state.currentFps}"),
         ParameterItem("Бітрейт", state.formattedBitrate),
         ParameterItem("Тривалість", state.connectionDuration),
-        ParameterItem("CPU Temp", "%.1f°C".format(state.cpuTemp)),
-        ParameterItem("Voltage", "%.1f V".format(state.inputVoltage))
+        ParameterItem("Battery Temp", "%.1f°C".format(state.cpuTemp)),
+        ParameterItem("Light Level", "%.1f lx".format(state.lightLevel)),
+        ParameterItem("Status", state.movementAlert),
+        ParameterItem("BLE Status", state.bleConnectionState),
+        // ЗАВДАННЯ 20: Статус MQTT в UI
+        ParameterItem("Smart Home", state.mqttStatus)
     )
     val protocols = listOf("RTSP", "HTTP", "MJPEG", "USB")
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
 
-        // 1. Картка статусу
+        // Картка статусу
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = cardColor)
@@ -344,7 +459,12 @@ fun MainContent(
             ) {
                 Text(
                     text = when {
-                        state.isCriticalAlert -> "КРИТИЧНА ПОМИЛКА!"
+                        state.isCriticalAlert -> {
+                            if (state.cpuTemp > 45f) "КРИТИЧНИЙ ПЕРЕГРІВ!"
+                            else if (state.inputVoltage > 0.1f && state.inputVoltage < 4.0f) "НИЗЬКА НАПРУГА!"
+                            else if (state.inputVoltage <= 0.1f) "ОЧІКУВАННЯ ДАНИХ..."
+                            else "КРИТИЧНА ПОМИЛКА!"
+                        }
                         state.isStreaming -> "ТРАНСЛЯЦІЯ АКТИВНА"
                         else -> "ТРАНСЛЯЦІЯ ЗУПИНЕНА"
                     },
@@ -429,7 +549,7 @@ fun MainContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .then(
-                                // Червона рамка якщо бітрейт падає низько (логіка може бути розширена)
+                                // Червона рамка якщо бітрейт падає низько
                                 if (state.currentBitrate < 2000 && state.currentBitrate > 0)
                                     Modifier.border(2.dp, Color.Red, RoundedCornerShape(12.dp))
                                 else Modifier
@@ -465,7 +585,11 @@ fun MainContent(
             onClick = onToggleStream,
             modifier = Modifier.fillMaxWidth().height(56.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (state.isStreaming) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                containerColor = when {
+                    state.isStreaming && state.isCriticalAlert -> MaterialTheme.colorScheme.error
+                    state.isStreaming -> Color(0xFF455A64)
+                    else -> MaterialTheme.colorScheme.primary
+                }
             )
         ) {
             Icon(Icons.Default.PlayArrow, contentDescription = null)

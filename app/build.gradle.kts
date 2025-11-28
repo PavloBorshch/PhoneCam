@@ -83,4 +83,12 @@ dependencies {
     implementation("androidx.paging:paging-compose:$paging_version")
 
     implementation("org.osmdroid:osmdroid-android:6.1.18")
+
+    val camerax_version = "1.3.1"
+    implementation("androidx.camera:camera-camera2:$camerax_version")
+    implementation("androidx.camera:camera-lifecycle:$camerax_version")
+    implementation("androidx.camera:camera-view:$camerax_version")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
 }

@@ -40,8 +40,8 @@ fun DashboardSection(state: WebcamUiState) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Візуальний алерт
-            val tempBorderColor = if (state.isCriticalAlert) Color.Red else Color.Transparent
+            // Картка Температури
+            val tempBorderColor = if (state.cpuTemp > 45.0f) Color.Red else Color.Transparent
 
             DashboardCard(
                 title = "CPU Temp",
@@ -52,15 +52,17 @@ fun DashboardSection(state: WebcamUiState) {
                     min = 0f,
                     max = 100f,
                     unit = "°C",
-                    warningThreshold = 60f,
-                    criticalThreshold = 80f
+                    warningThreshold = 40f,
+                    criticalThreshold = 45f
                 )
             }
 
             // Картка Вольтажу
+            val voltBorderColor = if (state.inputVoltage < 4.0f) Color.Red else Color.Transparent
+
             DashboardCard(
                 title = "Input Voltage",
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f).border(2.dp, voltBorderColor, RoundedCornerShape(12.dp))
             ) {
                 LinearKpi(
                     value = state.inputVoltage,
